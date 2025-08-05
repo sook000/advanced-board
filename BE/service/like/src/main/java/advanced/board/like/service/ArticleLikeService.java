@@ -2,17 +2,22 @@ package advanced.board.like.service;
 
 import advanced.board.common.snowflake.Snowflake;
 import advanced.board.like.entity.ArticleLike;
+import advanced.board.like.entity.ArticleLikeCount;
+import advanced.board.like.repository.ArticleLikeCountRepository;
 import advanced.board.like.repository.ArticleLikeRepository;
 import advanced.board.like.service.response.ArticleLikeResponse;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class ArticleLikeService {
     private final Snowflake snowflake = new Snowflake();
     private final ArticleLikeRepository articleLikeRepository;
+    private final ArticleLikeCountRepository articleLikeCountRepository;
 
     public ArticleLikeResponse read(Long articleId, Long userId) {
         return articleLikeRepository.findByArticleIdAndUserId(articleId, userId)
@@ -20,8 +25,42 @@ public class ArticleLikeService {
                 .orElseThrow();
     }
 
+    /**
+     * update 구문
+     */
     @Transactional
-    public void like(Long articleId, Long userId) {
+    public void likePessimisticLock1(Long articleId, Long userId) {
+        ArticleLike articleLike = articleLikeRepository.save(
+                ArticleLike.create(
+                        snowflake.nextId(),
+                        articleId,
+                        userId
+                )
+        );
+
+        int result = articleLikeCountRepository.increase(articleId);
+        if (result == 0) {
+            // 최초 요청 시에는 update 되는 레코드가 없으므로, 1로 초기화한다.
+            articleLikeCountRepository.save(
+                    ArticleLikeCount.init(articleId, 1L)
+            );
+        }
+    }
+
+    @Transactional
+    public void unlikePessimisticLock1(Long articleId, Long userId) {
+        articleLikeRepository.findByArticleIdAndUserId(articleId, userId)
+                .ifPresent(articleLike -> {
+                    articleLikeRepository.delete(articleLike);
+                    articleLikeCountRepository.decrease(articleId);
+                });
+    }
+
+    /**
+     * select ... for update + update
+     */
+    @Transactional
+    public void likePessimisticLock2(Long articleId, Long userId) {
         articleLikeRepository.save(
                 ArticleLike.create(
                         snowflake.nextId(),
@@ -29,12 +68,51 @@ public class ArticleLikeService {
                         userId
                 )
         );
+        ArticleLikeCount articleLikeCount = articleLikeCountRepository.findLockedByArticleId(articleId)
+                .orElseGet(() -> ArticleLikeCount.init(articleId, 0L));
+        articleLikeCount.increase();
+        articleLikeCountRepository.save(articleLikeCount);
     }
 
     @Transactional
-    public void unlike(Long articleId, Long userId) {
+    public void unlikePessimisticLock2(Long articleId, Long userId) {
         articleLikeRepository.findByArticleIdAndUserId(articleId, userId)
-                .ifPresent(articleLikeRepository::delete);
+                .ifPresent(articleLike -> {
+                    articleLikeRepository.delete(articleLike);
+                    ArticleLikeCount articleLikeCount = articleLikeCountRepository.findLockedByArticleId(articleId).orElseThrow();
+                    articleLikeCount.decrease();
+                });
     }
 
+    @Transactional
+    public void likeOptimisticLock(Long articleId, Long userId) {
+        articleLikeRepository.save(
+                ArticleLike.create(
+                        snowflake.nextId(),
+                        articleId,
+                        userId
+                )
+        );
+
+        ArticleLikeCount articleLikeCount = articleLikeCountRepository.findById(articleId)
+                .orElseGet(() -> ArticleLikeCount.init(articleId, 0L));
+        articleLikeCount.increase();
+        articleLikeCountRepository.save(articleLikeCount);
+    }
+
+    @Transactional
+    public void unlikeOptimisticLock(Long articleId, Long userId) {
+        articleLikeRepository.findByArticleIdAndUserId(articleId, userId)
+                .ifPresent(articleLike -> {
+                    articleLikeRepository.delete(articleLike);
+                    ArticleLikeCount articleLikeCount = articleLikeCountRepository.findById(articleId).orElseThrow();
+                    articleLikeCount.decrease();
+                });
+    }
+
+    public Long count(Long articleId) {
+        return articleLikeCountRepository.findById(articleId)
+                .map(ArticleLikeCount::getLikeCount)
+                .orElse(0L);
+    }
 }
